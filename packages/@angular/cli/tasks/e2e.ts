@@ -1,26 +1,77 @@
+import * as url from 'url';
+import { stripIndents } from 'common-tags';
+
+import { E2eTaskOptions } from '../commands/e2e';
+import { CliConfig } from '../models/config';
+import { requireProjectModule } from '../utilities/require-project-module';
+
 const Task = require('../ember-cli/lib/models/task');
-import * as chalk from 'chalk';
-import {exec} from 'child_process';
+const SilentError = require('silent-error');
 
 
 export const E2eTask = Task.extend({
-  run: function () {
-    const ui = this.ui;
-    let exitCode = 0;
+  run: function (e2eTaskOptions: E2eTaskOptions) {
+    const projectConfig = CliConfig.fromProject().config;
+    const projectRoot = this.project.root;
+    const protractorLauncher = requireProjectModule(projectRoot, 'protractor/built/launcher');
 
-    return new Promise((resolve) => {
-      exec(`npm run e2e -- ${this.project.ngConfig.config.e2e.protractor.config}`,
-        (err: NodeJS.ErrnoException, stdout: string, stderr: string) => {
-          ui.writeLine(stdout);
-          if (err) {
-            ui.writeLine(stderr);
-            ui.writeLine(chalk.red('Some end-to-end tests failed, see above.'));
-            exitCode = 1;
-          } else {
-            ui.writeLine(chalk.green('All end-to-end tests pass.'));
-          }
-          resolve(exitCode);
+    if (projectConfig.project && projectConfig.project.ejected) {
+      throw new SilentError('An ejected project cannot use the build command anymore.');
+    }
+
+    return new Promise(function () {
+      let promise = Promise.resolve();
+      let additionalProtractorConfig: any = {
+        elementExplorer: e2eTaskOptions.elementExplorer
+      };
+
+      // use serve url as override for protractors baseUrl
+      if (e2eTaskOptions.serve) {
+        additionalProtractorConfig.baseUrl = url.format({
+          protocol: e2eTaskOptions.ssl ? 'https' : 'http',
+          hostname: e2eTaskOptions.host,
+          port: e2eTaskOptions.port.toString()
         });
+      } else if (e2eTaskOptions.baseHref) {
+        additionalProtractorConfig.baseUrl = e2eTaskOptions.baseHref;
+      }
+
+      if (e2eTaskOptions.specs.length !== 0) {
+        additionalProtractorConfig['specs'] = e2eTaskOptions.specs;
+      }
+
+      if (e2eTaskOptions.webdriverUpdate) {
+        // The webdriver-manager update command can only be accessed via a deep import.
+        const webdriverDeepImport = 'webdriver-manager/built/lib/cmds/update';
+        let webdriverUpdate: any;
+
+        try {
+          // When using npm, webdriver is within protractor/node_modules.
+          webdriverUpdate = requireProjectModule(projectRoot,
+            `protractor/node_modules/${webdriverDeepImport}`);
+        } catch (e) {
+          try {
+            // When using yarn, webdriver is found as a root module.
+            webdriverUpdate = requireProjectModule(projectRoot, webdriverDeepImport);
+          } catch (e) {
+            throw new SilentError(stripIndents`
+              Cannot automatically find webdriver-manager to update.
+              Update webdriver-manager manually and run 'ng e2e --no-webdriver-update' instead.
+            `);
+          }
+        }
+        // run `webdriver-manager update --standalone false --gecko false --quiet`
+        // if you change this, update the command comment in prev line, and in `eject` task
+        promise = promise.then(() => webdriverUpdate.program.run({
+          standalone: false,
+          gecko: false,
+          quiet: true
+        }));
+      }
+
+      // Don't call resolve(), protractor will manage exiting the process itself
+      return promise.then(() =>
+        protractorLauncher.init(e2eTaskOptions.config, additionalProtractorConfig));
     });
   }
 });

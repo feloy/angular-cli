@@ -1,16 +1,10 @@
 import * as ts from 'typescript';
 import * as fs from 'fs';
-import {Symbols} from '@angular/tsc-wrapped/src/symbols';
-import {
-  isMetadataImportedSymbolReferenceExpression,
-  isMetadataModuleReferenceExpression
-} from '@angular/tsc-wrapped';
-import {Change, InsertChange, NoopChange, MultiChange} from './change';
-import {findNodes} from './node';
-import {insertImport} from './route-utils';
-
-import {Observable} from 'rxjs/Observable';
-import {ReplaySubject} from 'rxjs/ReplaySubject';
+import { Change, InsertChange, NoopChange, MultiChange } from './change';
+import { findNodes } from './node';
+import { insertImport } from './route-utils';
+import { Observable } from 'rxjs/Observable';
+import { ReplaySubject } from 'rxjs/ReplaySubject';
 import 'rxjs/add/observable/empty';
 import 'rxjs/add/observable/of';
 import 'rxjs/add/operator/do';
@@ -94,7 +88,7 @@ export function insertAfterLastOccurrence(nodes: ts.Node[], toInsert: string,
 }
 
 
-export function getContentOfKeyLiteral(source: ts.SourceFile, node: ts.Node): string {
+export function getContentOfKeyLiteral(_source: ts.SourceFile, node: ts.Node): string {
   if (node.kind == ts.SyntaxKind.Identifier) {
     return (node as ts.Identifier).text;
   } else if (node.kind == ts.SyntaxKind.StringLiteral) {
@@ -105,43 +99,93 @@ export function getContentOfKeyLiteral(source: ts.SourceFile, node: ts.Node): st
 }
 
 
+
+function _angularImportsFromNode(node: ts.ImportDeclaration,
+                                 _sourceFile: ts.SourceFile): {[name: string]: string} {
+  const ms = node.moduleSpecifier;
+  let modulePath: string | null = null;
+  switch (ms.kind) {
+    case ts.SyntaxKind.StringLiteral:
+      modulePath = (ms as ts.StringLiteral).text;
+      break;
+    default:
+      return {};
+  }
+
+  if (!modulePath.startsWith('@angular/')) {
+    return {};
+  }
+
+  if (node.importClause) {
+    if (node.importClause.name) {
+      // This is of the form `import Name from 'path'`. Ignore.
+      return {};
+    } else if (node.importClause.namedBindings) {
+      const nb = node.importClause.namedBindings;
+      if (nb.kind == ts.SyntaxKind.NamespaceImport) {
+        // This is of the form `import * as name from 'path'`. Return `name.`.
+        return {
+          [(nb as ts.NamespaceImport).name.text + '.']: modulePath
+        };
+      } else {
+        // This is of the form `import {a,b,c} from 'path'`
+        const namedImports = nb as ts.NamedImports;
+
+        return namedImports.elements
+          .map((is: ts.ImportSpecifier) => is.propertyName ? is.propertyName.text : is.name.text)
+          .reduce((acc: {[name: string]: string}, curr: string) => {
+            acc[curr] = modulePath;
+            return acc;
+          }, {});
+      }
+    }
+  } else {
+    // This is of the form `import 'path';`. Nothing to do.
+    return {};
+  }
+}
+
+
 export function getDecoratorMetadata(source: ts.SourceFile, identifier: string,
                                      module: string): Observable<ts.Node> {
-  const symbols = new Symbols(source as any);
+  const angularImports: {[name: string]: string}
+    = findNodes(source, ts.SyntaxKind.ImportDeclaration)
+      .map((node: ts.ImportDeclaration) => _angularImportsFromNode(node, source))
+      .reduce((acc: {[name: string]: string}, current: {[name: string]: string}) => {
+        for (const key of Object.keys(current)) {
+          acc[key] = current[key];
+        }
+        return acc;
+      }, {});
 
   return getSourceNodes(source)
     .filter(node => {
       return node.kind == ts.SyntaxKind.Decorator
-          && (<ts.Decorator>node).expression.kind == ts.SyntaxKind.CallExpression;
+          && (node as ts.Decorator).expression.kind == ts.SyntaxKind.CallExpression;
     })
-    .map(node => <ts.CallExpression>(<ts.Decorator>node).expression)
+    .map(node => (node as ts.Decorator).expression as ts.CallExpression)
     .filter(expr => {
       if (expr.expression.kind == ts.SyntaxKind.Identifier) {
-        const id = <ts.Identifier>expr.expression;
-        const metaData = symbols.resolve(id.getFullText(source));
-        if (isMetadataImportedSymbolReferenceExpression(metaData)) {
-          return metaData.name == identifier && metaData.module == module;
-        }
+        const id = expr.expression as ts.Identifier;
+        return id.getFullText(source) == identifier
+            && angularImports[id.getFullText(source)] === module;
       } else if (expr.expression.kind == ts.SyntaxKind.PropertyAccessExpression) {
         // This covers foo.NgModule when importing * as foo.
-        const paExpr = <ts.PropertyAccessExpression>expr.expression;
+        const paExpr = expr.expression as ts.PropertyAccessExpression;
         // If the left expression is not an identifier, just give up at that point.
         if (paExpr.expression.kind !== ts.SyntaxKind.Identifier) {
           return false;
         }
 
-        const id = paExpr.name;
-        const moduleId = <ts.Identifier>paExpr.expression;
-        const moduleMetaData = symbols.resolve(moduleId.getFullText(source));
-        if (isMetadataModuleReferenceExpression(moduleMetaData)) {
-          return moduleMetaData.module == module && id.getFullText(source) == identifier;
-        }
+        const id = paExpr.name.text;
+        const moduleId = (<ts.Identifier>paExpr.expression).getText(source);
+        return id === identifier && (angularImports[moduleId + '.'] === module);
       }
       return false;
     })
     .filter(expr => expr.arguments[0]
                  && expr.arguments[0].kind == ts.SyntaxKind.ObjectLiteralExpression)
-    .map(expr => <ts.ObjectLiteralExpression>expr.arguments[0]);
+    .map(expr => expr.arguments[0] as ts.ObjectLiteralExpression);
 }
 
 
@@ -184,14 +228,14 @@ function _addSymbolToNgModuleMetadata(ngModulePath: string, metadataField: strin
         return metadata.toPromise();
       }
 
-      const assignment = <ts.PropertyAssignment>matchingProperties[0];
+      const assignment = matchingProperties[0] as ts.PropertyAssignment;
 
       // If it's not an array, nothing we can do really.
       if (assignment.initializer.kind !== ts.SyntaxKind.ArrayLiteralExpression) {
         return null;
       }
 
-      const arrLiteral = <ts.ArrayLiteralExpression>assignment.initializer;
+      const arrLiteral = assignment.initializer as ts.ArrayLiteralExpression;
       if (arrLiteral.elements.length == 0) {
         // Forward the property.
         return arrLiteral;
@@ -200,11 +244,17 @@ function _addSymbolToNgModuleMetadata(ngModulePath: string, metadataField: strin
     })
     .then((node: ts.Node) => {
       if (!node) {
-        /* eslint-disable no-console */
         console.log('No app module found. Please add your new class to your component.');
         return new NoopChange();
       }
+
       if (Array.isArray(node)) {
+        const nodeArray = node as any as Array<ts.Node>;
+        const symbolsArray = nodeArray.map(node => node.getText());
+        if (symbolsArray.includes(symbolName)) {
+          return new NoopChange();
+        }
+
         node = node[node.length - 1];
       }
 
@@ -213,7 +263,7 @@ function _addSymbolToNgModuleMetadata(ngModulePath: string, metadataField: strin
       if (node.kind == ts.SyntaxKind.ObjectLiteralExpression) {
         // We haven't found the field in the metadata declaration. Insert a new
         // field.
-        let expr = <ts.ObjectLiteralExpression>node;
+        let expr = node as ts.ObjectLiteralExpression;
         if (expr.properties.length == 0) {
           position = expr.getEnd() - 1;
           toInsert = `  ${metadataField}: [${symbolName}]\n`;
@@ -281,7 +331,7 @@ export function addProviderToModule(modulePath: string, classifiedName: string,
  * Custom function to insert an export into NgModule. It also imports it.
  */
 export function addExportToModule(modulePath: string, classifiedName: string,
-                                    importPath: string): Promise<Change> {
+                                  importPath: string): Promise<Change> {
   return _addSymbolToNgModuleMetadata(modulePath, 'exports', classifiedName, importPath);
 }
 

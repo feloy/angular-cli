@@ -5,6 +5,7 @@ import {
 } from '../../utils/process';
 import {writeFile, prependToFile, appendToFile} from '../../utils/fs';
 import {wait} from '../../utils/utils';
+import {getGlobalVariable} from '../../utils/env';
 
 
 const doneRe =
@@ -14,6 +15,10 @@ const doneRe =
 
 export default function() {
   if (process.platform.startsWith('win')) {
+    return Promise.resolve();
+  }
+  // Skip this in ejected tests.
+  if (getGlobalVariable('argv').eject) {
     return Promise.resolve();
   }
 
@@ -34,8 +39,8 @@ export default function() {
       console.log(funky('town'));
     `))
     // Should trigger a rebuild, no error expected.
-    .then(() => waitForAnyProcessOutputToMatch(doneRe, 5000))
-    // Create and import files.
+    .then(() => waitForAnyProcessOutputToMatch(doneRe, 10000))
+    // Make an invalid version of the file.
     .then(() => wait(2000))
     .then(() => writeFile('src/funky2.ts', `
       export function funky(value: number): number {
@@ -43,7 +48,19 @@ export default function() {
       }
     `))
     // Should trigger a rebuild, this time an error is expected.
-    .then(() => waitForAnyProcessOutputToMatch(doneRe, 5000))
+    .then(() => waitForAnyProcessOutputToMatch(doneRe, 10000))
+    .then(({ stdout }) => {
+      if (!/ERROR in .*\/src\/main\.ts \(/.test(stdout)) {
+        throw new Error('Expected an error but none happened.');
+      }
+    })
+    // Change an UNRELATED file and the error should still happen.
+    .then(() => wait(2000))
+    .then(() => appendToFile('src/app/app.module.ts', `
+      function anything(): number {}
+    `))
+    // Should trigger a rebuild, this time an error is expected.
+    .then(() => waitForAnyProcessOutputToMatch(doneRe, 10000))
     .then(({ stdout }) => {
       if (!/ERROR in .*\/src\/main\.ts \(/.test(stdout)) {
         throw new Error('Expected an error but none happened.');
@@ -55,7 +72,7 @@ export default function() {
         return value + 'hello';
       }
     `))
-    .then(() => waitForAnyProcessOutputToMatch(doneRe, 5000))
+    .then(() => waitForAnyProcessOutputToMatch(doneRe, 10000))
     .then(({ stdout }) => {
       if (/ERROR in .*\/src\/main\.ts \(/.test(stdout)) {
         throw new Error('Expected no error but an error was shown.');
